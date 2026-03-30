@@ -2,8 +2,9 @@ import telebot
 from telebot import types
 
 # === НАСТРОЙКИ ===
-TOKEN = '8208494401:AAEXk9JyrSv0mhr3KdCy5Xoqi9pTK_4uRdU'
-GROUP_ID = -1001234567890123   # ID вашей приватной группы
+import os
+TOKEN = os.getenv('TOKEN')
+GROUP_ID = int(os.getenv('GROUP_ID'))
 
 bot = telebot.TeleBot(TOKEN)
 
