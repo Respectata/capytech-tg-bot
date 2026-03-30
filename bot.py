@@ -2,8 +2,8 @@ import telebot
 from telebot import types
 
 # === НАСТРОЙКИ ===
-TOKEN = 'ВСТАВЬТЕ_СВОЙ_ТОКЕН_ЗДЕСЬ'
-GROUP_ID = -1001234567890123   # ID вашей приватной группы
+TOKEN = '8208494401:AAEXk9JyrSv0mhr3KdCy5Xoqi9pTK_4uRdU'
+GROUP_ID = -5119781780   # ID вашей приватной группы
 
 MAX_FILE_SIZE_MB = 50          # ← Максимальный размер файла в МБ (можно изменить)
 
