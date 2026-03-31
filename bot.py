@@ -1,10 +1,28 @@
+import os
 import telebot
 from telebot import types
 
-# === НАСТРОЙКИ ===
-import os
+# === НАСТРОЙКИ ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ===
 TOKEN = os.getenv('TOKEN')
-GROUP_ID = int(os.getenv('GROUP_ID'))
+GROUP_ID_STR = os.getenv('GROUP_ID')
+
+if not TOKEN:
+    print("❌ ОШИБКА: Переменная TOKEN не задана в Railway!")
+    print("Добавь её в Variables → Name: TOKEN, Value: твой_токен_от_BotFather")
+    exit(1)
+
+if not GROUP_ID_STR:
+    print("❌ ОШИБКА: Переменная GROUP_ID не задана в Railway!")
+    print("Добавь её в Variables → Name: GROUP_ID, Value: -1001234567890123")
+    exit(1)
+
+try:
+    GROUP_ID = int(GROUP_ID_STR)
+except ValueError:
+    print("❌ ОШИБКА: GROUP_ID должен быть числом (например -1001234567890123)")
+    exit(1)
+
+print(f"✅ Настройки загружены. GROUP_ID = {GROUP_ID}")
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -52,7 +70,7 @@ def is_valid_obj(data: bytes) -> bool:
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.send_message(message.chat.id,
-        "👋 Привет! Это бот 3D-печати фермы.\n\n"
+        "👋 Привет! Это бот 3D-печати от CapyTech.\n\n"
         "Пришлите файл модели **.stl** или **.obj** и в подписи напишите описание задачи.\n"
         "Мы проверяем не только расширение, но и содержимое файла.")
 
@@ -130,7 +148,7 @@ def handle_document(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    if call.message.chat.id != GROUP_ID:
+    if call.message.chat.id != GROUP_ID_STR:
         return
     
     data = call.data.split('_')
@@ -146,12 +164,12 @@ def callback_handler(call):
     
     if action == "accept":
         bot.answer_callback_query(call.id, "Заказ принят в работу!")
-        bot.send_message(GROUP_ID, f"✅ Заказ #{group_msg_id} принят в работу @{call.from_user.username or call.from_user.first_name}")
+        bot.send_message(GROUP_ID_STR, f"✅ Заказ #{group_msg_id} принят в работу @{call.from_user.username or call.from_user.first_name}")
         
     elif action == "calc":
         bot.answer_callback_query(call.id)
         msg = bot.send_message(
-            GROUP_ID,
+            GROUP_ID_STR,
             f"💰 Расчёт для заказа #{group_msg_id}\n\n"
             "Напишите стоимость и сроки в формате:\n"
             "`Цена: 1500 руб.\nСрок: 3 дня\nКомментарий: ...`",
@@ -164,7 +182,7 @@ def callback_handler(call):
     elif action == "reject":
         bot.answer_callback_query(call.id)
         bot.send_message(
-            GROUP_ID,
+            GROUP_ID_STR,
             f"❌ Укажите причину отклонения заказа #{group_msg_id} и отправьте сообщение.",
             reply_to_message_id=call.message.message_id
         )
@@ -172,7 +190,7 @@ def callback_handler(call):
 
 @bot.message_handler(content_types=['text'])
 def handle_team_reply(message):
-    if message.chat.id != GROUP_ID:
+    if message.chat.id != GROUP_ID_STR:
         return
     
     for msg_id, order in list(orders.items()):
@@ -185,7 +203,7 @@ def handle_team_reply(message):
                 f"💰 **Расчёт от нашей команды:**\n{message.text}",
                 parse_mode='Markdown'
             )
-            bot.send_message(GROUP_ID, "✅ Расчёт отправлен клиенту.")
+            bot.send_message(GROUP_ID_STR, "✅ Расчёт отправлен клиенту.")
             order.pop('waiting_calc', None)
             order.pop('calc_msg_id', None)
             return
@@ -195,7 +213,7 @@ def handle_team_reply(message):
                 order['client_chat_id'],
                 f"❌ К сожалению, ваш заказ не может быть принят.\n\nПричина:\n{message.text}",
             )
-            bot.send_message(GROUP_ID, "❌ Отклонение отправлено клиенту.")
+            bot.send_message(GROUP_ID_STR, "❌ Отклонение отправлено клиенту.")
             order.pop('waiting_reject', None)
             return
 
