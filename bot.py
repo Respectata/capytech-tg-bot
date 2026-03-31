@@ -168,12 +168,18 @@ def handle_text(message):
         return
 
     if text == "📋 Мои заказы":
-        # Ваш код вывода заказов (оставлен как был ранее)
-        orders_list = user_orders.get(str(chat_id), [])
+        orders_list = get_user_orders(chat_id)
         if not orders_list:
             bot.send_message(chat_id, "📋 У вас пока нет заказов.", reply_markup=get_main_keyboard())
             return
-        # ... добавьте вывод заказов по аналогии с предыдущими версиями
+        response = "📋 <b>Ваши заказы:</b>\n\n"
+        for order in reversed(orders_list[-10:]):
+            params = []
+            if order.get('material'): params.append(f"Мат: {order['material']}")
+            if order.get('infill'): params.append(f"Заполн: {order['infill']}%")
+            if order.get('perimeters'): params.append(f"Перим: {order['perimeters']}")
+            response += f"🔹 <b>#{order['order_id']}</b> — {order['date']}\n📎 {order['filename']}\nСтатус: <b>{order['status']}</b>\n{' | '.join(params)}\n\n"
+        bot.send_message(chat_id, response, parse_mode='HTML', reply_markup=get_main_keyboard())
         return
 
     # === Обработка шагов уточнения параметров ===
