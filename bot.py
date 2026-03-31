@@ -37,6 +37,8 @@ def save_orders(data):
 user_orders = load_orders()
 pending_orders = {}  # chat_id → данные временного заказа
 
+def get_user_orders(user_id):
+    return user_orders.get(str(user_id), [])
 
 # ====================== КЛАВИАТУРЫ ======================
 def get_main_keyboard():
