@@ -16,7 +16,7 @@ if not TOKEN or not GROUP_ID_STR:
 GROUP_ID = int(GROUP_ID_STR)
 DATA_FILE = 'orders.json'
 
-print(f"✅ Бот запущен. GROUP_ID = {GROUP_ID}")
+print(f"✅ Бот запущен. Вроде всё работает!")
 
 bot = telebot.TeleBot(TOKEN)
 
