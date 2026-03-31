@@ -7,7 +7,7 @@ from telebot import types
 # ====================== НАСТРОЙКИ ======================
 TOKEN = os.getenv('TOKEN')
 GROUP_ID_STR = os.getenv('GROUP_ID')
-MAX_FILE_SIZE_MB = 50
+MAX_FILE_SIZE_MB = 100
 
 if not TOKEN or not GROUP_ID_STR:
     print("❌ Ошибка: TOKEN или GROUP_ID не заданы!")
