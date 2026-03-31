@@ -3,6 +3,8 @@ import json
 import datetime
 import telebot
 from telebot import types
+from stl import mesh as stl_mesh
+import numpy as np
 
 # ====================== НАСТРОЙКИ ======================
 TOKEN = os.getenv('TOKEN')
@@ -37,8 +39,46 @@ def save_orders(data):
 user_orders = load_orders()
 pending_orders = {}  # chat_id → данные временного заказа
 
+
 def get_user_orders(user_id):
     return user_orders.get(str(user_id), [])
+
+
+# ====================== ИЗВЛЕЧЕНИЕ РАЗМЕРОВ ======================
+def get_model_dimensions(file_path: str, filename: str):
+    """Возвращает (width, length, height) в мм"""
+    try:
+        ext = filename.lower().split('.')[-1]
+        
+        if ext == 'stl':
+            your_mesh = stl_mesh.Mesh.from_file(file_path)
+            min_coords = your_mesh.points.min(axis=0)
+            max_coords = your_mesh.points.max(axis=0)
+        elif ext == 'obj':
+            vertices = []
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    if line.startswith('v '):
+                        parts = line.strip().split()
+                        if len(parts) >= 4:
+                            vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+            if not vertices:
+                return None, None, None
+            verts = np.array(vertices)
+            min_coords = verts.min(axis=0)
+            max_coords = verts.max(axis=0)
+        else:
+            return None, None, None
+
+        width = round(max_coords[0] - min_coords[0], 2)
+        length = round(max_coords[1] - min_coords[1], 2)
+        height = round(max_coords[2] - min_coords[2], 2)
+
+        return width, length, height
+    except Exception as e:
+        print(f"Ошибка извлечения размеров: {e}")
+        return None, None, None
+
 
 # ====================== КЛАВИАТУРЫ ======================
 def get_main_keyboard():
@@ -112,16 +152,20 @@ def handle_document(message):
 
     file_size_mb = message.document.file_size / (1024 * 1024)
     if file_size_mb > MAX_FILE_SIZE_MB:
-        bot.reply_to(message, f"❌ Файл слишком большой ({file_size_mb:.1f} МБ). Максимум {MAX_FILE_SIZE_MB} МБ.", 
+        bot.reply_to(message, f"❌ Файл слишком большой ({file_size_mb:.1f} МБ). Максимум {MAX_FILE_SIZE_MB} МБ.",
                      reply_markup=get_main_keyboard())
         return
 
     try:
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
+        
+        file_path = f"/tmp/{message.document.file_name}"
+        with open(file_path, "wb") as f:
+            f.write(downloaded)
+
         is_valid = False
         triangles = 0
-
         if filename.endswith('.stl'):
             is_valid, triangles = get_stl_info(downloaded)
         else:
@@ -129,17 +173,24 @@ def handle_document(message):
 
         if not is_valid:
             bot.reply_to(message, "❌ Файл не является корректным STL или OBJ.", reply_markup=get_main_keyboard())
+            if os.path.exists(file_path):
+                os.remove(file_path)
             return
     except Exception as e:
         print(f"Ошибка проверки файла: {e}")
         bot.reply_to(message, "⚠️ Ошибка при проверке файла.", reply_markup=get_main_keyboard())
         return
 
-    # Создаём временный заказ
+    # Извлекаем размеры
+    width, length, height = get_model_dimensions(file_path, filename)
+    dim_text = f"📏 Размеры: **{width} × {length} × {height} мм**\n\n" if width else ""
+
     pending_orders[message.chat.id] = {
+        'file_path': file_path,
         'filename': message.document.file_name,
         'description': message.caption or "Без описания",
         'triangles': triangles,
+        'dimensions': {'width': width, 'length': length, 'height': height},
         'user_id': message.from_user.id,
         'first_name': message.from_user.first_name,
         'username': message.from_user.username,
@@ -151,47 +202,43 @@ def handle_document(message):
     }
 
     bot.reply_to(message,
-        "✅ Файл успешно принят!\n\n"
+        f"✅ Файл успешно принят!\n{dim_text}"
         "<b>Шаг 1 из 4:</b> Выберите материал",
         parse_mode='HTML',
         reply_markup=get_material_keyboard()
     )
 
 
-# ====================== УТОЧНЕНИЕ ПАРАМЕТРОВ ======================
+# ====================== ОБРАБОТКА ТЕКСТА ======================
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     text = message.text.strip()
     chat_id = message.chat.id
 
     if text == "💰 Рассчитать стоимость":
-        bot.send_message(chat_id, "📤 Отправьте файл .stl или .obj с описанием в подписи.", 
+        bot.send_message(chat_id, "📤 Отправьте файл модели (.stl или .obj) с описанием в подписи.", 
                          reply_markup=get_main_keyboard())
         return
 
-# ==================== КНОПКА «МОИ ЗАКАЗЫ» ====================
     if text == "📋 Мои заказы":
-        orders_list = get_user_orders(chat_id)   # ваша функция из хранилища
-        
+        orders_list = get_user_orders(chat_id)
         if not orders_list:
-            bot.send_message(chat_id, 
+            bot.send_message(chat_id,
                 "📋 У вас пока нет заказов.\n\nОтправьте первую модель через кнопку «💰 Рассчитать стоимость».",
                 reply_markup=get_main_keyboard())
             return
 
         response = "📋 <b>Ваши последние заказы:</b>\n\n"
-        
-        for order in reversed(orders_list[-10:]):   # показываем последние 10
+        for order in reversed(orders_list[-10:]):
             status_emoji = {
-                "Новый": "🆕",
-                "В работе": "🔄",
-                "Расчёт готов": "✅",
-                "Готов к выдаче": "📦",
-                "Выдан": "🎉",
-                "Отклонён": "❌"
+                "Новый": "🆕", "В работе": "🔄", "Расчёт готов": "✅",
+                "Готов к выдаче": "📦", "Выдан": "🎉", "Отклонён": "❌"
             }.get(order.get('status', 'Новый'), "📋")
 
             params = []
+            dims = order.get('dimensions', {})
+            if dims.get('width'):
+                params.append(f"📏 {dims['width']}×{dims['length']}×{dims['height']} мм")
             if order.get('material'): params.append(f"Мат: {order['material']}")
             if order.get('infill'): params.append(f"Заполн: {order['infill']}%")
             if order.get('perimeters'): params.append(f"Стенки: {order['perimeters']}")
@@ -209,24 +256,23 @@ def handle_text(message):
         bot.send_message(chat_id, response, parse_mode='HTML', reply_markup=get_main_keyboard())
         return
 
-    # === Обработка шагов уточнения параметров ===
+    # Обработка шагов параметров
     if chat_id in pending_orders:
         order = pending_orders[chat_id]
-
         if order['step'] == 'material':
             if text in ["PLA", "PETG", "ABS", "TPU"]:
                 order['material'] = text
                 order['step'] = 'first_layer'
-                bot.send_message(chat_id, f"✅ Материал выбран: <b>{text}</b>\n\nВведите высоту первого слоя (например: 0.2):", parse_mode='HTML')
+                bot.send_message(chat_id, f"✅ Материал: <b>{text}</b>\n\nВведите высоту первого слоя (например: 0.2):", parse_mode='HTML')
             else:
-                bot.send_message(chat_id, "Пожалуйста, выберите материал из кнопок.", reply_markup=get_material_keyboard())
+                bot.send_message(chat_id, "Выберите материал из кнопок.", reply_markup=get_material_keyboard())
             return
 
         elif order['step'] == 'first_layer':
             try:
                 order['first_layer_height'] = float(text.replace(',', '.'))
                 order['step'] = 'perimeters'
-                bot.send_message(chat_id, f"✅ Высота первого слоя: <b>{order['first_layer_height']} мм</b>\n\nУкажите количество периметров (стенок):", parse_mode='HTML')
+                bot.send_message(chat_id, f"✅ Высота первого слоя: <b>{order['first_layer_height']} мм</b>\n\nУкажите количество периметров:", parse_mode='HTML')
             except:
                 bot.send_message(chat_id, "Введите число, например 0.2")
             return
@@ -246,12 +292,10 @@ def handle_text(message):
                 if 0 <= infill <= 100:
                     order['infill'] = infill
                     order['step'] = 'confirm'
-                    bot.send_message(chat_id,
-                        "✅ Все параметры собраны!\n\nПроверьте и подтвердите заказ:",
-                        parse_mode='HTML',
-                        reply_markup=get_confirm_keyboard())
+                    bot.send_message(chat_id, "✅ Параметры собраны!\nПодтвердите заказ:", 
+                                     parse_mode='HTML', reply_markup=get_confirm_keyboard())
                 else:
-                    bot.send_message(chat_id, "Заполнение должно быть от 0 до 100")
+                    bot.send_message(chat_id, "Заполнение от 0 до 100%")
             except:
                 bot.send_message(chat_id, "Введите число от 0 до 100")
             return
@@ -262,15 +306,17 @@ def handle_text(message):
 def callback_handler(call):
     chat_id = call.message.chat.id
 
-    # Кнопки подтверждения заказа
     if call.data == "confirm_order" and chat_id in pending_orders:
         order = pending_orders.pop(chat_id)
+        dims = order.get('dimensions', {})
+        dim_text = f"{dims.get('width')} × {dims.get('length')} × {dims.get('height')} мм" if dims.get('width') else "—"
 
         final_order = {
             'order_id': int(datetime.datetime.now().timestamp()),
             'filename': order['filename'],
             'description': order['description'],
             'triangles': order.get('triangles', 0),
+            'dimensions': dims,
             'material': order['material'],
             'first_layer_height': order.get('first_layer_height'),
             'perimeters': order.get('perimeters'),
@@ -282,33 +328,28 @@ def callback_handler(call):
             'date': datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
         }
 
-        # Сохраняем заказ
         user_id_str = str(chat_id)
         if user_id_str not in user_orders:
             user_orders[user_id_str] = []
         user_orders[user_id_str].append(final_order)
         save_orders(user_orders)
 
-        # Уведомление в группу
         user_link = f"<a href='tg://user?id={order['user_id']}'>{order['first_name']}</a>"
         if order.get('username'):
             user_link += f" (@{order['username']})"
-
-        params_text = (
-            f"Материал: {order['material']}\n"
-            f"Первый слой: {order.get('first_layer_height')} мм\n"
-            f"Периметры: {order.get('perimeters')}\n"
-            f"Заполнение: {order.get('infill')}%"
-        )
 
         notification = (
             f"📦 <b>Новый заказ #{final_order['order_id']}</b>\n\n"
             f"👤 {user_link}\n"
             f"📎 {order['filename']}\n"
+            f"📏 {dim_text}\n"
             f"📝 {order['description']}\n"
             f"📊 Треугольников: {order.get('triangles', 0):,}\n\n"
-            f"<b>Параметры:</b>\n{params_text}\n"
-            f"Статус: <b>Новый</b>"
+            f"<b>Параметры:</b>\n"
+            f"Материал: {order['material']}\n"
+            f"Первый слой: {order.get('first_layer_height')} мм\n"
+            f"Периметры: {order.get('perimeters')}\n"
+            f"Заполнение: {order.get('infill')}%"
         )
 
         team_markup = types.InlineKeyboardMarkup(row_width=2)
@@ -320,23 +361,22 @@ def callback_handler(call):
 
         bot.send_message(GROUP_ID, notification, parse_mode='HTML', reply_markup=team_markup)
 
-        bot.send_message(chat_id, 
-            "✅ Заказ успешно отправлен в работу!\nНаша команда уже видит все параметры и скоро пришлёт расчёт.",
-            reply_markup=get_main_keyboard())
+        bot.send_message(chat_id,
+            f"✅ Заказ успешно отправлен!\n📏 Размеры: **{dim_text}**",
+            parse_mode='HTML', reply_markup=get_main_keyboard())
 
     elif call.data == "edit_params" and chat_id in pending_orders:
-        # Сброс параметров и возврат к первому шагу
         pending_orders[chat_id]['step'] = 'material'
         bot.send_message(chat_id, "✏️ Параметры сброшены.\nВыберите материал заново:", 
                          reply_markup=get_material_keyboard())
 
-    # Кнопки команды в группе
+    # Кнопки команды
     elif call.data.startswith("team_"):
+        # (оставляем вашу текущую обработку team_accept, team_calc, team_reject без изменений)
         parts = call.data.split('_')
         action = parts[1]
         order_id = int(parts[2])
 
-        # Поиск заказа и клиента
         client_chat_id = None
         target_order = None
         for uid, ord_list in user_orders.items():
@@ -361,21 +401,18 @@ def callback_handler(call):
 
         elif action == "calc":
             bot.answer_callback_query(call.id)
-            bot.send_message(GROUP_ID,
-                f"💰 Расчёт стоимости для заказа #{order_id}\n\n"
-                "Напишите ответ reply на это сообщение:",
-                parse_mode='Markdown',
-                reply_to_message_id=call.message.message_id)
+            bot.send_message(GROUP_ID, f"💰 Расчёт для заказа #{order_id}\nНапишите reply на это сообщение.", 
+                             parse_mode='Markdown', reply_to_message_id=call.message.message_id)
             target_order['waiting_calc'] = True
 
         elif action == "reject":
             bot.answer_callback_query(call.id)
-            bot.send_message(GROUP_ID, f"❌ Напишите причину отклонения заказа #{order_id}:", 
+            bot.send_message(GROUP_ID, f"❌ Укажите причину отклонения заказа #{order_id}:", 
                              reply_to_message_id=call.message.message_id)
             target_order['waiting_reject'] = True
 
     bot.answer_callback_query(call.id)
 
 
-print("🚀 Бот запущен!")
+print("🚀 Бот CapyTech 3D Print запущен с размерами моделей!")
 bot.infinity_polling()
