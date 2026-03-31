@@ -350,5 +350,5 @@ def callback_handler(call):
     bot.answer_callback_query(call.id)
 
 
-print("🚀 Бот запущен — кнопки «Подтвердить заказ» и «Изменить параметры» работают!")
+print("🚀 Бот запущен!")
 bot.infinity_polling()
