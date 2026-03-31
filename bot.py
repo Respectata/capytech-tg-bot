@@ -167,18 +167,43 @@ def handle_text(message):
                          reply_markup=get_main_keyboard())
         return
 
+# ==================== КНОПКА «МОИ ЗАКАЗЫ» ====================
     if text == "📋 Мои заказы":
-        orders_list = get_user_orders(chat_id)
+        orders_list = get_user_orders(chat_id)   # ваша функция из хранилища
+        
         if not orders_list:
-            bot.send_message(chat_id, "📋 У вас пока нет заказов.", reply_markup=get_main_keyboard())
+            bot.send_message(chat_id, 
+                "📋 У вас пока нет заказов.\n\nОтправьте первую модель через кнопку «💰 Рассчитать стоимость».",
+                reply_markup=get_main_keyboard())
             return
-        response = "📋 <b>Ваши заказы:</b>\n\n"
-        for order in reversed(orders_list[-10:]):
+
+        response = "📋 <b>Ваши последние заказы:</b>\n\n"
+        
+        for order in reversed(orders_list[-10:]):   # показываем последние 10
+            status_emoji = {
+                "Новый": "🆕",
+                "В работе": "🔄",
+                "Расчёт готов": "✅",
+                "Готов к выдаче": "📦",
+                "Выдан": "🎉",
+                "Отклонён": "❌"
+            }.get(order.get('status', 'Новый'), "📋")
+
             params = []
             if order.get('material'): params.append(f"Мат: {order['material']}")
             if order.get('infill'): params.append(f"Заполн: {order['infill']}%")
-            if order.get('perimeters'): params.append(f"Перим: {order['perimeters']}")
-            response += f"🔹 <b>#{order['order_id']}</b> — {order['date']}\n📎 {order['filename']}\nСтатус: <b>{order['status']}</b>\n{' | '.join(params)}\n\n"
+            if order.get('perimeters'): params.append(f"Стенки: {order['perimeters']}")
+            if order.get('print_time'): params.append(f"⏱ {order['print_time']}")
+            if order.get('filament_weight'): params.append(f"🧪 {order['filament_weight']} г")
+            if order.get('estimated_cost'): params.append(f"💰 ~{order['estimated_cost']} руб.")
+
+            response += (
+                f"{status_emoji} <b>Заказ #{order.get('order_id', '—')}</b> — {order.get('date', '')}\n"
+                f"📎 {order.get('filename', '—')}\n"
+                f"Статус: <b>{order.get('status', 'Новый')}</b>\n"
+                f"{' | '.join(params) if params else 'Параметры не указаны'}\n\n"
+            )
+
         bot.send_message(chat_id, response, parse_mode='HTML', reply_markup=get_main_keyboard())
         return
 
