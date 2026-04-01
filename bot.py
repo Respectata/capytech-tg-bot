@@ -418,4 +418,5 @@ def callback_handler(call):
 
 
 print("🚀 Бот запущен! Размеры округляются до 0.1 мм.")
+time.sleep(2)
 bot.infinity_polling()
