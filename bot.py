@@ -44,9 +44,9 @@ def get_user_orders(user_id):
     return user_orders.get(str(user_id), [])
 
 
-# ====================== ИЗВЛЕЧЕНИЕ РАЗМЕРОВ ======================
+# ====================== ИЗВЛЕЧЕНИЕ РАЗМЕРОВ (округление до 0.1 мм) ======================
 def get_model_dimensions(file_path: str, filename: str):
-    """Возвращает (width, length, height) в мм"""
+    """Возвращает (width, length, height) в мм, округлённые до одной десятой"""
     try:
         ext = filename.lower().split('.')[-1]
         
@@ -70,11 +70,13 @@ def get_model_dimensions(file_path: str, filename: str):
         else:
             return None, None, None
 
-        width = round(max_coords[0] - min_coords[0], 2)
-        length = round(max_coords[1] - min_coords[1], 2)
-        height = round(max_coords[2] - min_coords[2], 2)
+        # Округляем до одной десятой (0.1 мм)
+        width = round(max_coords[0] - min_coords[0], 1)
+        length = round(max_coords[1] - min_coords[1], 1)
+        height = round(max_coords[2] - min_coords[2], 1)
 
         return width, length, height
+
     except Exception as e:
         print(f"Ошибка извлечения размеров: {e}")
         return None, None, None
@@ -181,7 +183,7 @@ def handle_document(message):
         bot.reply_to(message, "⚠️ Ошибка при проверке файла.", reply_markup=get_main_keyboard())
         return
 
-    # Извлекаем размеры
+    # Извлекаем размеры (округление до 0.1 мм)
     width, length, height = get_model_dimensions(file_path, filename)
     dim_text = f"📏 Размеры: **{width} × {length} × {height} мм**\n\n" if width else ""
 
@@ -256,9 +258,10 @@ def handle_text(message):
         bot.send_message(chat_id, response, parse_mode='HTML', reply_markup=get_main_keyboard())
         return
 
-    # Обработка шагов параметров
+    # Обработка параметров заказа
     if chat_id in pending_orders:
         order = pending_orders[chat_id]
+
         if order['step'] == 'material':
             if text in ["PLA", "PETG", "ABS", "TPU"]:
                 order['material'] = text
@@ -292,7 +295,7 @@ def handle_text(message):
                 if 0 <= infill <= 100:
                     order['infill'] = infill
                     order['step'] = 'confirm'
-                    bot.send_message(chat_id, "✅ Параметры собраны!\nПодтвердите заказ:", 
+                    bot.send_message(chat_id, "✅ Все параметры собраны!\nПодтвердите заказ:", 
                                      parse_mode='HTML', reply_markup=get_confirm_keyboard())
                 else:
                     bot.send_message(chat_id, "Заполнение от 0 до 100%")
@@ -370,9 +373,8 @@ def callback_handler(call):
         bot.send_message(chat_id, "✏️ Параметры сброшены.\nВыберите материал заново:", 
                          reply_markup=get_material_keyboard())
 
-    # Кнопки команды
+    # Кнопки команды (оставлены без изменений)
     elif call.data.startswith("team_"):
-        # (оставляем вашу текущую обработку team_accept, team_calc, team_reject без изменений)
         parts = call.data.split('_')
         action = parts[1]
         order_id = int(parts[2])
@@ -401,8 +403,9 @@ def callback_handler(call):
 
         elif action == "calc":
             bot.answer_callback_query(call.id)
-            bot.send_message(GROUP_ID, f"💰 Расчёт для заказа #{order_id}\nНапишите reply на это сообщение.", 
-                             parse_mode='Markdown', reply_to_message_id=call.message.message_id)
+            bot.send_message(GROUP_ID,
+                f"💰 Расчёт для заказа #{order_id}\n\nНапишите reply на это сообщение:",
+                parse_mode='Markdown', reply_to_message_id=call.message.message_id)
             target_order['waiting_calc'] = True
 
         elif action == "reject":
@@ -414,5 +417,5 @@ def callback_handler(call):
     bot.answer_callback_query(call.id)
 
 
-print("🚀 Бот CapyTech 3D Print запущен с размерами моделей!")
+print("🚀 Бот запущен! Размеры округляются до 0.1 мм.")
 bot.infinity_polling()
