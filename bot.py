@@ -44,39 +44,19 @@ def get_user_orders(user_id):
     return user_orders.get(str(user_id), [])
 
 
-# ====================== ИЗВЛЕЧЕНИЕ РАЗМЕРОВ (округление до 0.1 мм) ======================
-def get_model_dimensions(file_path: str, filename: str):
-    """Возвращает (width, length, height) в мм, округлённые до одной десятой"""
+# ====================== ИЗВЛЕЧЕНИЕ РАЗМЕРОВ (только STL) ======================
+def get_model_dimensions(file_path: str):
+    """Возвращает (width, length, height) в мм, округлённые до 0.1 мм"""
     try:
-        ext = filename.lower().split('.')[-1]
-        
-        if ext == 'stl':
-            your_mesh = stl_mesh.Mesh.from_file(file_path)
-            min_coords = your_mesh.points.min(axis=0)
-            max_coords = your_mesh.points.max(axis=0)
-        elif ext == 'obj':
-            vertices = []
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    if line.startswith('v '):
-                        parts = line.strip().split()
-                        if len(parts) >= 4:
-                            vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
-            if not vertices:
-                return None, None, None
-            verts = np.array(vertices)
-            min_coords = verts.min(axis=0)
-            max_coords = verts.max(axis=0)
-        else:
-            return None, None, None
+        your_mesh = stl_mesh.Mesh.from_file(file_path)
+        min_coords = your_mesh.points.min(axis=0)
+        max_coords = your_mesh.points.max(axis=0)
 
-        # Округляем до одной десятой (0.1 мм)
         width = round(max_coords[0] - min_coords[0], 1)
         length = round(max_coords[1] - min_coords[1], 1)
         height = round(max_coords[2] - min_coords[2], 1)
 
         return width, length, height
-
     except Exception as e:
         print(f"Ошибка извлечения размеров: {e}")
         return None, None, None
@@ -104,8 +84,8 @@ def get_confirm_keyboard():
     return markup
 
 
-# ====================== ПРОВЕРКА ФАЙЛОВ ======================
-def get_stl_info(data: bytes):
+# ====================== ПРОВЕРКА STL ======================
+def is_valid_stl(data: bytes):
     if len(data) < 84:
         return False, 0
     try:
@@ -123,33 +103,25 @@ def get_stl_info(data: bytes):
         pass
     return False, 0
 
-def is_valid_obj(data: bytes) -> bool:
-    try:
-        text = data.decode('utf-8', errors='ignore').lower()
-        lines = text.splitlines()[:150]
-        return any(l.startswith('v ') for l in lines) and any(l.startswith('f ') for l in lines)
-    except:
-        return False
-
 
 # ====================== СТАРТ ======================
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.send_message(message.chat.id,
         "👋 <b>Добро пожаловать в CapyTech 3D Print!</b>\n\n"
-        "Нажмите «💰 Рассчитать стоимость» и отправьте файл модели (.stl или .obj)",
+        "Нажмите «💰 Рассчитать стоимость» и отправьте файл **.stl**",
         parse_mode='HTML', reply_markup=get_main_keyboard())
 
 
-# ====================== ОБРАБОТКА ФАЙЛА ======================
+# ====================== ОБРАБОТКА ФАЙЛА (только STL) ======================
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
     if not message.document:
         return
 
     filename = (message.document.file_name or '').lower()
-    if not filename.endswith(('.stl', '.obj')):
-        bot.reply_to(message, "❌ Принимаем только .stl и .obj файлы.", reply_markup=get_main_keyboard())
+    if not filename.endswith('.stl'):
+        bot.reply_to(message, "❌ Принимаем только файлы **.stl**.", reply_markup=get_main_keyboard())
         return
 
     file_size_mb = message.document.file_size / (1024 * 1024)
@@ -166,15 +138,9 @@ def handle_document(message):
         with open(file_path, "wb") as f:
             f.write(downloaded)
 
-        is_valid = False
-        triangles = 0
-        if filename.endswith('.stl'):
-            is_valid, triangles = get_stl_info(downloaded)
-        else:
-            is_valid = is_valid_obj(downloaded)
-
+        is_valid, triangles = is_valid_stl(downloaded)
         if not is_valid:
-            bot.reply_to(message, "❌ Файл не является корректным STL или OBJ.", reply_markup=get_main_keyboard())
+            bot.reply_to(message, "❌ Файл не является корректным STL-файлом.", reply_markup=get_main_keyboard())
             if os.path.exists(file_path):
                 os.remove(file_path)
             return
@@ -183,8 +149,8 @@ def handle_document(message):
         bot.reply_to(message, "⚠️ Ошибка при проверке файла.", reply_markup=get_main_keyboard())
         return
 
-    # Извлекаем размеры (округление до 0.1 мм)
-    width, length, height = get_model_dimensions(file_path, filename)
+    # Извлекаем размеры модели
+    width, length, height = get_model_dimensions(file_path)
     dim_text = f"📏 Размеры: **{width} × {length} × {height} мм**\n\n" if width else ""
 
     pending_orders[message.chat.id] = {
@@ -204,7 +170,7 @@ def handle_document(message):
     }
 
     bot.reply_to(message,
-        f"✅ Файл успешно принят!\n{dim_text}"
+        f"✅ Файл .stl успешно принят!\n{dim_text}"
         "<b>Шаг 1 из 4:</b> Выберите материал",
         parse_mode='HTML',
         reply_markup=get_material_keyboard()
@@ -218,7 +184,7 @@ def handle_text(message):
     chat_id = message.chat.id
 
     if text == "💰 Рассчитать стоимость":
-        bot.send_message(chat_id, "📤 Отправьте файл модели (.stl или .obj) с описанием в подписи.", 
+        bot.send_message(chat_id, "📤 Отправьте файл модели **.stl** с описанием в подписи.", 
                          reply_markup=get_main_keyboard())
         return
 
@@ -258,7 +224,7 @@ def handle_text(message):
         bot.send_message(chat_id, response, parse_mode='HTML', reply_markup=get_main_keyboard())
         return
 
-    # Обработка параметров заказа
+    # Обработка шагов параметров
     if chat_id in pending_orders:
         order = pending_orders[chat_id]
 
@@ -373,7 +339,7 @@ def callback_handler(call):
         bot.send_message(chat_id, "✏️ Параметры сброшены.\nВыберите материал заново:", 
                          reply_markup=get_material_keyboard())
 
-    # Кнопки команды (оставлены без изменений)
+    # Кнопки команды
     elif call.data.startswith("team_"):
         parts = call.data.split('_')
         action = parts[1]
@@ -417,5 +383,5 @@ def callback_handler(call):
     bot.answer_callback_query(call.id)
 
 
-print("🚀 Бот запущен! Размеры округляются до 0.1 мм.")
+print("🚀 Бот запущен! Поддерживается только формат .stl")
 bot.infinity_polling()
