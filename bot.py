@@ -1,31 +1,37 @@
 import os
 import json
 import datetime
-import subprocess
-import re
 import telebot
 from telebot import types
 from stl import mesh as stl_mesh
-import numpy as np
+from dotenv import load_dotenv
+
+# ====================== ЗАГРУЗКА ПЕРЕМЕННЫХ ======================
+load_dotenv()
 
 # ====================== НАСТРОЙКИ ======================
 TOKEN = os.getenv('TOKEN')
 GROUP_ID_STR = os.getenv('GROUP_ID')
 MAX_FILE_SIZE_MB = 50
 
-# Настройки OrcaSlicer
-PROFILES_DIR = "/app/profiles"                    # Измените, если папка с профилями в другом месте
-FILAMENT_COST = {"PLA": 0.08, "PETG": 0.09, "ABS": 0.10, "TPU": 0.12}  # руб/грамм
-MACHINE_COST_PER_HOUR = 15                        # руб/час работы принтера
+# Цены за 1 грамм пластика (руб)
+PLA_PRICE  = float(os.getenv('PLA_PRICE', 0.08))
+PETG_PRICE = float(os.getenv('PETG_PRICE', 0.09))
+ABS_PRICE  = float(os.getenv('ABS_PRICE', 0.10))
+TPU_PRICE  = float(os.getenv('TPU_PRICE', 0.12))
+
+FIXED_MARKUP = 150   # Фиксированная наценка
 
 if not TOKEN or not GROUP_ID_STR:
     print("❌ Ошибка: TOKEN или GROUP_ID не заданы!")
+    print("Проверьте файл .env")
+    input("Нажмите Enter для выхода...")
     exit(1)
 
 GROUP_ID = int(GROUP_ID_STR)
 DATA_FILE = 'orders.json'
 
-print(f"✅ Бот запущен. GROUP_ID = {GROUP_ID} | OrcaSlicer активен")
+print(f"✅ Бот запущен. GROUP_ID = {GROUP_ID} | Наценка = {FIXED_MARKUP} руб.")
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -40,11 +46,20 @@ def load_orders():
     return {}
 
 def save_orders(data):
+    def convert(obj):
+        if isinstance(obj, dict):
+            return {k: convert(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert(i) for i in obj]
+        elif isinstance(obj, float):
+            return float(obj)
+        return obj
+
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(convert(data), f, ensure_ascii=False, indent=2)
 
 user_orders = load_orders()
-pending_orders = {}  # chat_id → временный заказ
+pending_orders = {}
 
 
 def get_user_orders(user_id):
@@ -53,15 +68,14 @@ def get_user_orders(user_id):
 
 # ====================== ИЗВЛЕЧЕНИЕ РАЗМЕРОВ ======================
 def get_model_dimensions(file_path: str):
-    """Возвращает ширину, длину и высоту в мм (округлено до 0.1 мм)"""
     try:
         your_mesh = stl_mesh.Mesh.from_file(file_path)
         min_coords = your_mesh.points.min(axis=0)
         max_coords = your_mesh.points.max(axis=0)
 
-        width = round(max_coords[0] - min_coords[0], 1)
-        length = round(max_coords[1] - min_coords[1], 1)
-        height = round(max_coords[2] - min_coords[2], 1)
+        width = round(float(max_coords[0] - min_coords[0]), 1)
+        length = round(float(max_coords[1] - min_coords[1]), 1)
+        height = round(float(max_coords[2] - min_coords[2]), 1)
 
         return width, length, height
     except Exception as e:
@@ -69,51 +83,30 @@ def get_model_dimensions(file_path: str):
         return None, None, None
 
 
-# ====================== РАСЧЁТ В ORCASLICER ======================
-def slice_with_orca(file_path: str, params: dict):
-    """Запускает OrcaSlicer и возвращает (время_печати, вес_пластика_г, ошибка)"""
-    try:
-        material = params['material']
-        output_gcode = file_path.replace('.stl', '_output.gcode')
+# ====================== ПРОСТОЙ РАСЧЁТ ======================
+def calculate_print_cost(dimensions: dict, material: str, infill: int, perimeters: int):
+    if not dimensions or not dimensions.get('width'):
+        return 0, 0
 
-        cmd = [
-            "orca-slicer",
-            "--slice",
-            "--load-printer", f"{PROFILES_DIR}/printer/your_printer.json",
-            "--load-filaments", f"{PROFILES_DIR}/filament/{material}.json",
-            "--load-settings", f"{PROFILES_DIR}/process/{material}_process.json",
-            "--first-layer-height", str(params.get('first_layer_height', 0.2)),
-            "--perimeters", str(params.get('perimeters', 3)),
-            "--sparse-infill-density", str(params.get('infill', 20)),
-            "--export-gcode", output_gcode,
-            file_path
-        ]
+    w = dimensions['width']
+    l = dimensions['length']
+    h = dimensions['height']
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    bounding_volume = (w * l * h) / 1000
+    wall_volume = (w * l * 2 + w * h * 2 + l * h * 2) * 0.4 * perimeters / 1000
+    infill_volume = bounding_volume * (infill / 100) * 0.75
 
-        if result.returncode != 0:
-            return None, None, f"Ошибка OrcaSlicer: {result.stderr[:300]}"
+    total_volume_cm3 = wall_volume + infill_volume
 
-        # Читаем G-code
-        with open(output_gcode, "r", encoding="utf-8", errors="ignore") as f:
-            gcode = f.read()
+    density = {"PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "TPU": 1.21}.get(material, 1.24)
+    weight_g = round(total_volume_cm3 * density, 1)
 
-        # Время печати
-        time_match = re.search(r"; estimated printing time .*?(\d+h)?\s*(\d+m)?\s*(\d+s)?", gcode, re.I)
-        print_time = "Неизвестно"
-        if time_match:
-            print_time = " ".join(g for g in time_match.groups() if g).strip()
+    price_per_gram = {"PLA": PLA_PRICE, "PETG": PETG_PRICE, "ABS": ABS_PRICE, "TPU": TPU_PRICE}.get(material, 0.09)
+    material_cost = round(weight_g * price_per_gram, 0)
 
-        # Вес пластика
-        weight_match = re.search(r"; filament used .*?\((\d+\.?\d*)g\)", gcode, re.I)
-        weight_g = int(float(weight_match.group(1))) if weight_match else 0
+    total_cost = int(material_cost + FIXED_MARKUP)
 
-        return print_time, weight_g, None
-
-    except subprocess.TimeoutExpired:
-        return None, None, "Таймаут расчёта (модель слишком большая)"
-    except Exception as e:
-        return None, None, f"Ошибка запуска OrcaSlicer: {str(e)}"
+    return total_cost, weight_g
 
 
 # ====================== КЛАВИАТУРЫ ======================
@@ -134,6 +127,18 @@ def get_confirm_keyboard():
     markup.add(
         types.InlineKeyboardButton("✅ Подтвердить заказ", callback_data="confirm_order"),
         types.InlineKeyboardButton("✏️ Изменить параметры", callback_data="edit_params")
+    )
+    return markup
+
+def get_order_control_keyboard(order_id):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Принять заказ", callback_data=f"team_accept_{order_id}"),
+        types.InlineKeyboardButton("💰 Рассчитать", callback_data=f"team_calc_{order_id}")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📥 Скачать файл", callback_data=f"download_{order_id}"),
+        types.InlineKeyboardButton("❌ Отклонить", callback_data=f"team_reject_{order_id}")
     )
     return markup
 
@@ -170,11 +175,7 @@ def start(message):
 # ====================== ОБРАБОТКА ФАЙЛА ======================
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
-    if not message.document:
-        return
-
-    filename = (message.document.file_name or '').lower()
-    if not filename.endswith('.stl'):
+    if not message.document or not message.document.file_name.lower().endswith('.stl'):
         bot.reply_to(message, "❌ Принимаем только файлы **.stl**.", reply_markup=get_main_keyboard())
         return
 
@@ -188,7 +189,8 @@ def handle_document(message):
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
 
-        file_path = f"/tmp/{message.document.file_name}"
+        file_path = f"./tmp/{message.document.file_name}"
+        os.makedirs("./tmp", exist_ok=True)
         with open(file_path, "wb") as f:
             f.write(downloaded)
 
@@ -199,11 +201,10 @@ def handle_document(message):
                 os.remove(file_path)
             return
     except Exception as e:
-        print(f"Ошибка проверки файла: {e}")
+        print(f"Ошибка при обработке файла: {e}")
         bot.reply_to(message, "⚠️ Ошибка при проверке файла.", reply_markup=get_main_keyboard())
         return
 
-    # Извлекаем размеры
     width, length, height = get_model_dimensions(file_path)
     dim_text = f"📏 Размеры: **{width} × {length} × {height} мм**\n\n" if width else ""
 
@@ -245,18 +246,12 @@ def handle_text(message):
     if text == "📋 Мои заказы":
         orders_list = get_user_orders(chat_id)
         if not orders_list:
-            bot.send_message(chat_id,
-                "📋 У вас пока нет заказов.\n\nОтправьте первую модель через кнопку «💰 Рассчитать стоимость».",
-                reply_markup=get_main_keyboard())
+            bot.send_message(chat_id, "📋 У вас пока нет заказов.", reply_markup=get_main_keyboard())
             return
 
         response = "📋 <b>Ваши последние заказы:</b>\n\n"
         for order in reversed(orders_list[-10:]):
-            status_emoji = {
-                "Новый": "🆕", "В работе": "🔄", "Расчёт готов": "✅",
-                "Готов к выдаче": "📦", "Выдан": "🎉", "Отклонён": "❌"
-            }.get(order.get('status', 'Новый'), "📋")
-
+            status_emoji = {"Новый": "🆕", "В работе": "🔄", "Расчёт готов": "✅"}.get(order.get('status', 'Новый'), "📋")
             params = []
             dims = order.get('dimensions', {})
             if dims.get('width'):
@@ -264,9 +259,8 @@ def handle_text(message):
             if order.get('material'): params.append(f"Мат: {order['material']}")
             if order.get('infill'): params.append(f"Заполн: {order['infill']}%")
             if order.get('perimeters'): params.append(f"Стенки: {order['perimeters']}")
-            if order.get('print_time'): params.append(f"⏱ {order['print_time']}")
-            if order.get('filament_weight'): params.append(f"🧪 {order['filament_weight']} г")
-            if order.get('estimated_cost'): params.append(f"💰 ~{order['estimated_cost']} руб.")
+            if order.get('filament_weight'): params.append(f"🧪 {order.get('filament_weight')} г")
+            if order.get('estimated_cost'): params.append(f"💰 ~{order.get('estimated_cost')} руб.")
 
             response += (
                 f"{status_emoji} <b>Заказ #{order.get('order_id', '—')}</b> — {order.get('date', '')}\n"
@@ -315,8 +309,21 @@ def handle_text(message):
                 if 0 <= infill <= 100:
                     order['infill'] = infill
                     order['step'] = 'confirm'
-                    bot.send_message(chat_id, "✅ Все параметры собраны!\nПодтвердите заказ:", 
-                                     parse_mode='HTML', reply_markup=get_confirm_keyboard())
+
+                    total_cost, weight_g = calculate_print_cost(
+                        order['dimensions'], order['material'], infill, order.get('perimeters', 3)
+                    )
+
+                    order['filament_weight'] = weight_g
+                    order['estimated_cost'] = total_cost
+
+                    bot.send_message(chat_id,
+                        f"✅ Параметры собраны!\n\n"
+                        f"🧪 Примерный расход пластика: {weight_g} г\n"
+                        f"💰 Примерная стоимость: <b>{total_cost} руб.</b>\n\n"
+                        "Подтвердите заказ или измените параметры.",
+                        parse_mode='HTML',
+                        reply_markup=get_confirm_keyboard())
                 else:
                     bot.send_message(chat_id, "Заполнение должно быть от 0 до 100")
             except:
@@ -331,27 +338,6 @@ def callback_handler(call):
 
     if call.data == "confirm_order" and chat_id in pending_orders:
         order = pending_orders.pop(chat_id)
-        bot.send_message(chat_id, "⏳ Запускаю расчёт в OrcaSlicer... Это может занять от 30 до 90 секунд.")
-
-        print_time, weight_g, error = slice_with_orca(order['file_path'], order)
-
-        if error:
-            bot.send_message(chat_id, f"⚠️ Ошибка расчёта:\n{error}")
-            return
-
-        # Расчёт стоимости
-        cost_per_gram = FILAMENT_COST.get(order['material'], 0.09)
-        material_cost = round(weight_g * cost_per_gram, 0)
-
-        hours = 0
-        if "h" in print_time:
-            hours += int(re.search(r'(\d+)h', print_time).group(1))
-        if "m" in print_time:
-            hours += int(re.search(r'(\d+)m', print_time).group(1)) / 60
-
-        machine_cost = round(hours * MACHINE_COST_PER_HOUR, 0)
-        total_cost = int(material_cost + machine_cost)
-
         dims = order.get('dimensions', {})
         dim_text = f"{dims.get('width')} × {dims.get('length')} × {dims.get('height')} мм" if dims.get('width') else "—"
 
@@ -365,58 +351,54 @@ def callback_handler(call):
             'first_layer_height': order.get('first_layer_height'),
             'perimeters': order.get('perimeters'),
             'infill': order.get('infill'),
-            'print_time': print_time,
-            'filament_weight': weight_g,
-            'estimated_cost': total_cost,
+            'filament_weight': order.get('filament_weight'),
+            'estimated_cost': order.get('estimated_cost'),
+            'file_path': order.get('file_path'),
             'user_id': order['user_id'],
             'first_name': order['first_name'],
             'username': order.get('username'),
-            'status': 'Расчёт готов',
+            'status': 'Новый',
             'date': datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
         }
 
-        # Сохраняем заказ
         user_id_str = str(chat_id)
         if user_id_str not in user_orders:
             user_orders[user_id_str] = []
         user_orders[user_id_str].append(final_order)
         save_orders(user_orders)
 
-        # Уведомление клиенту
-        bot.send_message(chat_id,
-            f"✅ <b>Расчёт готов!</b>\n\n"
-            f"📎 {order['filename']}\n"
-            f"📏 {dim_text}\n"
-            f"⏱ Время печати: {print_time}\n"
-            f"🧪 Пластик: {weight_g} г\n"
-            f"💰 Примерная стоимость: <b>{total_cost} руб.</b>",
-            parse_mode='HTML', reply_markup=get_main_keyboard())
-
-        # Уведомление в группу
         user_link = f"<a href='tg://user?id={order['user_id']}'>{order['first_name']}</a>"
         if order.get('username'):
             user_link += f" (@{order['username']})"
 
-        bot.send_message(GROUP_ID,
-            f"📦 <b>Новый заказ с расчётом</b>\n\n"
+        notification = (
+            f"📦 <b>Новый заказ #{final_order['order_id']}</b>\n\n"
             f"👤 {user_link}\n"
             f"📎 {order['filename']}\n"
             f"📏 {dim_text}\n"
-            f"⏱ {print_time}\n"
-            f"🧪 {weight_g} г\n"
-            f"💰 ~{total_cost} руб.",
-            parse_mode='HTML')
+            f"📝 {order['description']}\n\n"
+            f"<b>Параметры:</b>\n"
+            f"Материал: {order['material']}\n"
+            f"Первый слой: {order.get('first_layer_height')} мм\n"
+            f"Периметры: {order.get('perimeters')}\n"
+            f"Заполнение: {order.get('infill')}%"
+        )
+
+        bot.send_message(GROUP_ID, notification, parse_mode='HTML', 
+                        reply_markup=get_order_control_keyboard(final_order['order_id']))
+
+        bot.send_message(chat_id,
+            f"✅ Заказ успешно отправлен!\n📏 Размеры: **{dim_text}**",
+            parse_mode='HTML', reply_markup=get_main_keyboard())
 
     elif call.data == "edit_params" and chat_id in pending_orders:
         pending_orders[chat_id]['step'] = 'material'
         bot.send_message(chat_id, "✏️ Параметры сброшены.\nВыберите материал заново:", 
                          reply_markup=get_material_keyboard())
 
-    # Кнопки команды в группе
-    elif call.data.startswith("team_"):
-        parts = call.data.split('_')
-        action = parts[1]
-        order_id = int(parts[2])
+    # ==================== ПРИНЯТЬ В РАБОТУ ====================
+    elif call.data.startswith("team_accept_"):
+        order_id = int(call.data.split('_')[2])
 
         client_chat_id = None
         target_order = None
@@ -429,32 +411,98 @@ def callback_handler(call):
             if client_chat_id:
                 break
 
-        if not client_chat_id:
+        if not client_chat_id or not target_order:
             bot.answer_callback_query(call.id, "Заказ не найден")
             return
 
-        if action == "accept":
-            target_order['status'] = "В работе"
-            save_orders(user_orders)
-            bot.answer_callback_query(call.id, "Заказ принят в работу")
-            bot.send_message(GROUP_ID, f"✅ Заказ #{order_id} принят в работу")
-            bot.send_message(client_chat_id, f"✅ Ваш заказ #{order_id} принят в работу!", parse_mode='HTML')
+        target_order['status'] = "В работе"
+        save_orders(user_orders)
 
-        elif action == "calc":
-            bot.answer_callback_query(call.id)
-            bot.send_message(GROUP_ID,
-                f"💰 Расчёт для заказа #{order_id}\n\nНапишите ответ reply на это сообщение.",
-                parse_mode='Markdown', reply_to_message_id=call.message.message_id)
-            target_order['waiting_calc'] = True
+        try:
+            bot.edit_message_reply_markup(
+                GROUP_ID, call.message.message_id,
+                reply_markup=get_order_control_keyboard(order_id)
+            )
+        except:
+            pass
 
-        elif action == "reject":
-            bot.answer_callback_query(call.id)
-            bot.send_message(GROUP_ID, f"❌ Укажите причину отклонения заказа #{order_id}:", 
-                             reply_to_message_id=call.message.message_id)
-            target_order['waiting_reject'] = True
+        bot.answer_callback_query(call.id, "✅ Заказ принят в работу")
+        bot.send_message(GROUP_ID, f"✅ Заказ #{order_id} принят в работу")
+        bot.send_message(client_chat_id, f"✅ Ваш заказ #{order_id} принят в работу!", parse_mode='HTML')
+
+    # ==================== СКАЧАТЬ ФАЙЛ (ИСПРАВЛЕНО) ====================
+    elif call.data.startswith("download_"):
+        order_id = int(call.data.split('_')[1])
+
+        file_path = None
+        filename = None
+        found = False
+
+        for uid, ord_list in user_orders.items():
+            for o in ord_list:
+                if o.get('order_id') == order_id:
+                    file_path = o.get('file_path')
+                    filename = o.get('filename')
+                    found = True
+                    break
+            if found:
+                break
+
+        if not found or not file_path:
+            bot.answer_callback_query(call.id, "❌ Заказ не найден")
+            return
+
+        if not os.path.exists(file_path):
+            bot.answer_callback_query(call.id, "❌ Файл не найден на сервере")
+            print(f"⚠️ Файл не найден: {file_path}")
+            return
+
+        try:
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            if file_size_mb > 50:
+                bot.answer_callback_query(call.id, "⚠️ Файл слишком большой (>50 МБ)")
+                return
+
+            with open(file_path, "rb") as f:
+                # Правильный способ отправки файла с именем
+                bot.send_document(
+                    call.from_user.id,
+                    f,
+                    caption=f"📎 Файл модели для заказа #{order_id}\nРазмер: {file_size_mb:.1f} МБ"
+                )
+
+            bot.answer_callback_query(call.id, "✅ Файл отправлен вам в личку")
+
+        except telebot.apihelper.ApiTelegramException as e:
+            error_msg = str(e).lower()
+            if "file is too big" in error_msg:
+                bot.answer_callback_query(call.id, "❌ Файл слишком большой для отправки")
+            elif "chat not found" in error_msg:
+                bot.answer_callback_query(call.id, "❌ Напишите боту /start в личных сообщениях")
+            else:
+                bot.answer_callback_query(call.id, "❌ Ошибка Telegram при отправке")
+            print(f"Telegram ошибка при скачивании #{order_id}: {e}")
+
+        except Exception as e:
+            bot.answer_callback_query(call.id, "⚠️ Неизвестная ошибка при отправке файла")
+            print(f"Ошибка скачивания файла #{order_id}: {e}")
+
+    # ==================== РУЧНОЙ РАСЧЁТ И ОТКЛОНЕНИЕ ====================
+    elif call.data.startswith("team_calc_"):
+        order_id = int(call.data.split('_')[2])
+        bot.answer_callback_query(call.id)
+        bot.send_message(GROUP_ID,
+            f"💰 Напишите финальный расчёт для заказа #{order_id} (ответьте reply)",
+            reply_to_message_id=call.message.message_id)
+
+    elif call.data.startswith("team_reject_"):
+        order_id = int(call.data.split('_')[2])
+        bot.answer_callback_query(call.id)
+        bot.send_message(GROUP_ID, f"❌ Укажите причину отклонения заказа #{order_id}:", 
+                         reply_to_message_id=call.message.message_id)
 
     bot.answer_callback_query(call.id)
 
 
-print("🚀 Бот CapyTech 3D Print запущен (только .stl + OrcaSlicer)")
+print("🚀 Бот CapyTech 3D Print запущен (исправлено скачивание файла)")
 bot.infinity_polling()
